@@ -25,7 +25,7 @@
 - `requirements.txt`: List of dependencies for environment reproducibility.
 
 ## 💻 How to Run
-1. **Clone the repo:** `git clone https://github.com/YOUR_USERNAME/Safe-Linker.git`
+1. **Clone the repo:** `git clone https://github.com/Bharambevaish/Safe-Linker.git`
 2. **Setup Venv:** `python -m venv .venv` and activate it.
 3. **Install:** `pip install -r requirements.txt`
 4. **Train Model:** `python train.py`
