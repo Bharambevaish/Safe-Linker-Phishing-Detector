@@ -10,31 +10,51 @@ SHORTENERS = [
     "just.as", "bkite.com", "moourl.com", "snipurl.com", "q.gs", "shorte.st"
 ]
 
+def normalize_url(url):
+    """
+    Lower-cases, trims and adds a default scheme when one is missing.
+    Checking for '://' (instead of urlparse().scheme) avoids treating
+    'example.com:8080/login' as having the scheme 'example.com'.
+    """
+    url = str(url).strip().lower()
+    if not url or url == "nan":
+        return ""
+    if "://" not in url:
+        url = "http://" + url
+    return url
+
+
+def _host_matches(hostname, domain):
+    """True if hostname is exactly `domain` or a subdomain of it."""
+    return hostname == domain or hostname.endswith("." + domain)
+
+
 def extract_features(url):
     """
     Extracts advanced features from a URL for phishing detection.
     Returns a dictionary of feature values.
     """
     try:
-        url = str(url).strip().lower()
+        url = normalize_url(url)
+        if not url:
+            return {}
         parsed = urlparse(url)
-        
-        # Add a default scheme if missing for proper parsing
-        if not parsed.scheme:
-            url = 'http://' + url
-            parsed = urlparse(url)
-            
+        # hostname strips credentials ("user@") and port (":8080") from netloc
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return {}
+
         features = {}
-        
+
         # 1. Base Lengths Features
         features['length_url'] = len(url)
-        features['length_hostname'] = len(parsed.netloc)
-        
+        features['length_hostname'] = len(hostname)
+
         # 2. IP in Domain
         try:
-            ipaddress.ip_address(parsed.netloc.split(':')[0])
+            ipaddress.ip_address(hostname)
             features['ip'] = 1
-        except:
+        except ValueError:
             features['ip'] = 0
 
         # 3. Basic Special Character Counts
@@ -60,21 +80,26 @@ def extract_features(url):
         
         # 4. URL Shortener Detection
         # Checks if the domain matches popular shortener services.
-        features['is_shortener'] = 1 if any(short in parsed.netloc for short in SHORTENERS) else 0
-        
-        # 5. Prefix/Suffix Check 
+        # Exact/subdomain match only: a plain substring test flagged hosts like
+        # "microsoft.com" because they contain "t.co".
+        features['is_shortener'] = 1 if any(_host_matches(hostname, s) for s in SHORTENERS) else 0
+
+        # 5. Prefix/Suffix Check
         # Legitimate sites usually don't have hyphens in the domain, phishers often use them.
-        features['domain_has_hyphen'] = 1 if '-' in parsed.netloc else 0
-        
+        features['domain_has_hyphen'] = 1 if '-' in hostname else 0
+
         # 6. Subdomain Count
-        # More than 2 subdomains is suspicious (excluding www)
-        # e.g., www.login.paypal.secure.com -> 4 dots
-        domain_parts = parsed.netloc.replace('www.', '').split('.')
-        features['subdomain_count'] = len(domain_parts) - 2 if len(domain_parts) > 2 else 0
-        
+        # More than 2 subdomains is suspicious (excluding a leading www)
+        # e.g., www.login.paypal.secure.com -> 2 extra subdomains
+        if features['ip']:
+            features['subdomain_count'] = 0
+        else:
+            domain_parts = hostname.removeprefix('www.').split('.')
+            features['subdomain_count'] = len(domain_parts) - 2 if len(domain_parts) > 2 else 0
+
         # 7. Abnormal URL
         # Checks if hostname is part of the URL path (common in open redirects or phishing)
-        features['abnormal_url'] = 1 if parsed.netloc != "" and parsed.netloc in parsed.path else 0
+        features['abnormal_url'] = 1 if hostname in parsed.path else 0
         
         # Additional features requested by Original Codebase to map smoothly safely
         features['nb_tilde'] = url.count('~')
@@ -127,32 +152,97 @@ def rule_based_severity(features_dict):
     return min(score, 1.0), reasons
 
 # ===============================================
-# EXTERNAL INTELLIGENCE MOcK
+# EXTERNAL THREAT INTELLIGENCE
 # ===============================================
+
+SAFE_BROWSING_ENDPOINT = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
+
+SUSPICIOUS_KEYWORDS = ['login', 'signin', 'secure', 'verify', 'update', 'banking', 'account', 'auth', 'password']
+
+# Brand name -> the brand's real domains. A brand name appearing on any other
+# host is a classic impersonation signal.
+BRAND_DOMAINS = {
+    'paypal': ['paypal.com', 'paypal.me'],
+    'appleid': ['apple.com'],
+    'apple': ['apple.com', 'icloud.com'],
+    'google': ['google.com', 'google.co.in', 'gmail.com', 'youtube.com'],
+    'microsoft': ['microsoft.com', 'live.com', 'office.com', 'outlook.com'],
+    'amazon': ['amazon.com', 'amazon.in'],
+    'facebook': ['facebook.com', 'fb.com'],
+    'netflix': ['netflix.com'],
+    'sbi': ['sbi.co.in', 'onlinesbi.sbi'],
+    'hdfc': ['hdfcbank.com'],
+    'icici': ['icicibank.com'],
+}
+
+
+def _official_host(hostname):
+    return any(_host_matches(hostname, d) for domains in BRAND_DOMAINS.values() for d in domains)
+
+
+def _google_safe_browsing(url, api_key, timeout=5):
+    """
+    Real Google Safe Browsing v4 lookup.
+    Returns (score, reasons) on success, or None if the call fails so the
+    caller can fall back to the offline heuristic.
+    """
+    import requests  # imported lazily so features.py works without it during training
+
+    body = {
+        "client": {"clientId": "safelinker", "clientVersion": "2.1"},
+        "threatInfo": {
+            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
+                            "POTENTIALLY_HARMFUL_APPLICATION"],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}],
+        },
+    }
+    try:
+        resp = requests.post(SAFE_BROWSING_ENDPOINT, params={"key": api_key}, json=body, timeout=timeout)
+        resp.raise_for_status()
+        matches = resp.json().get("matches", [])
+    except Exception:
+        return None
+
+    if not matches:
+        return 0.0, []
+    types = sorted({m.get("threatType", "UNKNOWN").replace("_", " ").title() for m in matches})
+    return 1.0, [f"Threat Intel: Google Safe Browsing lists this URL ({', '.join(types)})."]
+
+
+def _heuristic_intel(url):
+    """Offline stand-in used when no API key is configured (demo mode)."""
+    reasons = []
+    score = 0.0
+    hostname = urlparse(url).hostname or ""
+    official = _official_host(hostname)
+
+    if not official and any(k in url for k in SUSPICIOUS_KEYWORDS):
+        score = 0.8
+        reasons.append("Threat Intel (offline heuristic): credential-related keywords on an unverified domain.")
+
+    impersonated = [b for b in BRAND_DOMAINS if b in url and not official]
+    if impersonated:
+        score = 1.0
+        reasons.append(f"Threat Intel (offline heuristic): mentions '{impersonated[0]}' but is not hosted on its official domain.")
+
+    return score, reasons
+
 
 def check_external_intel(url, google_api_key=None, phishtank_key=None):
     """
-    # MOCK API: Checks Google Safe Browsing and PhishTank.
-    # Replace the mocked response below with the actual `requests` call when keys are provided.
+    Returns (score, reasons, mode) where score is 0.0 (clean) to 1.0 (flagged)
+    and mode is "live" (Google Safe Browsing answered) or "offline".
     """
-    reasons = []
-    intel_score = 0.0 # 0.0 means safe, 1.0 means flagged
-    
-    # -------------------------------------------------------------
-    # TODO for real implementation: 
-    # Use requests.post for Google Safe Browsing V4 API 
-    # Use requests.get for Phishtank CheckURL API
-    # -------------------------------------------------------------
-    
-    # MOCK LOGIC for demo purposes
-    suspicious_keywords = ['login', 'secure', 'verify', 'update', 'banking', 'account', 'auth']
-    if any(k in url for k in suspicious_keywords) and ('google' not in url):
-        # Fake a hit on an API
-        intel_score = 0.8
-        reasons.append("Threat Intel: URL keyword heuristics overlap with flagged databases (Mock PhishTank flag).")
-        
-    if "paypal" in url or "appleid" in url:
-        intel_score = 1.0
-        reasons.append("Threat Intel: Flagged by Google Safe Browsing (Mock response) as highly deceptive.")
+    url = normalize_url(url)
+    if not url:
+        return 0.0, [], "offline"
 
-    return intel_score, reasons
+    if google_api_key:
+        result = _google_safe_browsing(url, google_api_key)
+        if result is not None:
+            return result[0], result[1], "live"
+
+    score, reasons = _heuristic_intel(url)
+    return score, reasons, "offline"

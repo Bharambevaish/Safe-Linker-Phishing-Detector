@@ -1,6 +1,13 @@
 .venv/
+venv/
 __pycache__/
-*.joblib
 *.xls
 *.csv
 .DS_Store
+
+# Secrets - never commit these
+.env
+.streamlit/secrets.toml
+
+# NOTE: the trained model files (*.joblib) ARE committed on purpose,
+# because the deployed app needs them and the dataset is not in the repo.

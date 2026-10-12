@@ -24,12 +24,22 @@
 - `features.py`: The core engine for advanced feature extraction.
 - `requirements.txt`: List of dependencies for environment reproducibility.
 
-## 💻 How to Run
-1. **Clone the repo:** `git clone https://github.com/Bharambevaish/Safe-Linker.git`
-2. **Setup Venv:** `python -m venv .venv` and activate it.
+## 💻 How to Run Locally
+1. **Clone the repo:** `git clone https://github.com/Bharambevaish/Safe-Linker-Phishing-Detector.git`
+2. **Setup venv (Python 3.12):** `python -m venv .venv` and activate it.
 3. **Install:** `pip install -r requirements.txt`
-4. **Train Model:** `python train.py`
-5. **Launch:** `streamlit run app.py`
+4. **Add the dataset:** place `dataset_phishing.xls` (or `.csv`) next to `train.py`, or run `python train.py --data path/to/file`.
+5. **Train Model:** `python train.py` — creates `voting_model.joblib`, `feature_names.joblib`, `feature_importance.joblib`.
+6. **(Optional) Live threat intel:** copy `.env.example` to `.env` and set `GOOGLE_SAFE_BROWSING_API_KEY`.
+7. **Launch:** `streamlit run app.py`
+
+## ☁️ Deployment (Streamlit Community Cloud)
+1. Train locally and **commit the three `.joblib` files** (the dataset itself stays out of git).
+2. Go to [share.streamlit.io](https://share.streamlit.io), click **Create app**, pick this repo, branch `main`, file `app.py`.
+3. In **Advanced settings** choose **Python 3.12**, and paste `GOOGLE_SAFE_BROWSING_API_KEY = "..."` into **Secrets** if you have one.
+4. Click **Deploy**.
+
+> The model files must be trained with the exact package versions in `requirements.txt`, otherwise the app cannot load them.
 
 ---
 *Developed by Vaishnavi Bharambe - Walchand College of Engineering*
