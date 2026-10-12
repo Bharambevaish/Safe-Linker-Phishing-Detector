@@ -11,10 +11,6 @@ SHORTENERS = [
 ]
 
 def extract_features(url):
-    """
-    Extracts advanced features from a URL for phishing detection.
-    Returns a dictionary of feature values.
-    """
     try:
         url = str(url).strip().lower()
         parsed = urlparse(url)
@@ -54,9 +50,9 @@ def extract_features(url):
         features['https_token'] = 1 if parsed.scheme == 'https' else 0
         features['http_in_path'] = 1 if 'http' in parsed.path else 0
         
-        # ===============================================
-        # ADVANCED FEATURE ENGINEERING (Siemens Upgrade)
-        # ===============================================
+      
+        # ADVANCED FEATURE ENGINEERING 
+       
         
         # 4. URL Shortener Detection
         # Checks if the domain matches popular shortener services.
