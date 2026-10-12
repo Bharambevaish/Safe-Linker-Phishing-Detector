@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
 import joblib
-import time
 import os
 
 # Import our modularized features
-from features import extract_features, rule_based_severity, check_external_intel
+from features import extract_features, rule_based_severity, check_external_intel, normalize_url
 
 # Configure page settings
 st.set_page_config(
@@ -89,6 +88,41 @@ st.markdown("""
 st.markdown("<h1 style='text-align: center; margin-bottom: 2rem;'>🛡️ Safe Linker Enterprise</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #94a3b8; font-size: 1.2rem; margin-bottom: 3rem;'>AI-Powered Advanced URL Phishing Threat Intelligence</p>", unsafe_allow_html=True)
 
+def get_secret(name):
+    """Read a key from environment / .env, or from a Streamlit secrets.toml if one exists."""
+    if os.environ.get(name):
+        return os.environ[name]
+    # Only touch st.secrets when a secrets file exists; otherwise Streamlit
+    # prints a red "No secrets found" error on the page.
+    secrets_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml"),
+        os.path.expanduser(os.path.join("~", ".streamlit", "secrets.toml")),
+    ]
+    if any(os.path.exists(p) for p in secrets_paths):
+        try:
+            return st.secrets.get(name)
+        except Exception:
+            return None
+    return None
+
+
+def load_dotenv_file():
+    """Minimal .env loader so local runs pick up keys without extra packages."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_dotenv_file()
+GOOGLE_API_KEY = get_secret("GOOGLE_SAFE_BROWSING_API_KEY")
+
+
 # Load the models globally
 @st.cache_resource
 def load_models():
@@ -96,156 +130,155 @@ def load_models():
     model_path = os.path.join(base_dir, "voting_model.joblib")
     features_path = os.path.join(base_dir, "feature_names.joblib")
     importance_path = os.path.join(base_dir, "feature_importance.joblib")
-    
-    if os.path.exists(model_path) and os.path.exists(features_path):
+
+    if not (os.path.exists(model_path) and os.path.exists(features_path)):
+        return None, None, None, "Model files not found."
+
+    try:
         model = joblib.load(model_path)
         feature_cols = joblib.load(features_path)
-        
-        # Load importance if available
-        importance_df = None
-        if os.path.exists(importance_path):
-            importance_df = joblib.load(importance_path)
-            
-        return model, feature_cols, importance_df
-    return None, None, None
+        importance_df = joblib.load(importance_path) if os.path.exists(importance_path) else None
+    except Exception as e:
+        # Usually a scikit-learn/xgboost version mismatch between training and deployment
+        return None, None, None, f"Model files could not be loaded ({type(e).__name__}: {e})."
 
-model, feature_cols, importance_df = load_models()
+    return model, feature_cols, importance_df, None
+
+
+model, feature_cols, importance_df, model_error = load_models()
+
+if model is None:
+    st.error(
+        f"{model_error} Run `python train.py` with the same package versions as "
+        "`requirements.txt`, then commit voting_model.joblib, feature_names.joblib "
+        "and feature_importance.joblib."
+    )
+    st.stop()
 
 # Input Section
 col1, col2, col3 = st.columns([1, 6, 1])
 with col2:
-    url_input = st.text_input("Enter URL to analyze:", placeholder="https://example.com/login", label_visibility="collapsed")
-    analyze_btn = st.button("Analyze Threat Profile")
+    with st.form("analyze_form", border=False):
+        url_input = st.text_input("Enter URL to analyze:", placeholder="https://example.com/login", label_visibility="collapsed")
+        analyze_btn = st.form_submit_button("Analyze Threat Profile")
+
+url_input = (url_input or "").strip()
+
+if analyze_btn and not url_input:
+    st.warning("Please enter a URL first.")
 
 if analyze_btn and url_input:
-    if model is None:
-        st.error("Please run train.py first to initialize the AI.")
-    else:
-        with st.spinner("Analyzing advanced heuristics and external intelligence..."):
-            time.sleep(1.5) # Simulate slight network/ML latency for premium UX feel
-            
-            # 1. Feature Extraction
-            features_dict = extract_features(url_input)
-            
-            # Ensure expected features exist
-            for col in feature_cols:
-                if col not in features_dict:
-                    features_dict[col] = 0
-            
-            # Map dict to DataFrame maintaining feature column order
-            df_features = pd.DataFrame([features_dict], columns=feature_cols)
-            df_features = df_features.fillna(0)
-            X_input = df_features.values
-            
-            # 2. Rule-Based Score
-            rule_score, rule_reasons = rule_based_severity(features_dict)
-            
-            # 3. External API Score (MOCK)
-            api_score, api_reasons = check_external_intel(url_input)
-            
-            # 4. ML Model Probability Score (Class 1: Malicious Probability)
-            ml_probs = model.predict_proba(X_input)[0]
-            ml_score = ml_probs[1] # Probability of being Malicious
-            
-            # ========================================================
-            # 5. Hybrid Optimization Formula
-            # ========================================================
-            # ML Model: 40%
-            # Rule Based: 30%
-            # API Threat Intel: 30%
-            hybrid_score_raw = (0.4 * ml_score) + (0.3 * rule_score) + (0.3 * api_score)
-            risk_percentage = min(hybrid_score_raw * 100, 100.0)
-            
-            # Determine Status 
-            if risk_percentage > 70:
-                status = "Critical Risk"
-                status_class = "risk-high"
-                icon = "🚨"
-            elif risk_percentage > 35:
-                status = "Suspicious"
-                status_class = "risk-med"
-                icon = "⚠️"
-            else:
-                status = "Verified Safe"
-                status_class = "risk-low"
-                icon = "✅"
+    with st.spinner("Analyzing advanced heuristics and external intelligence..."):
+        # 1. Feature Extraction
+        features_dict = extract_features(url_input)
 
-        # RESULTS DASHBOARD
-        st.markdown("---")
-        
-        col_res1, col_res2 = st.columns([1, 2])
-        
-        with col_res1:
-            st.markdown(f"""
-            <div class='glass-card' style='text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center;'>
-                <h3 style='color: #94a3b8; font-weight: 500;'>Overall Risk Score</h3>
-                <p class='metric-value {status_class}'>{risk_percentage:.1f}%</p>
-                <div style='font-size: 1.5rem; margin-top: 10px; font-weight: bold;'>{icon} {status}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        with col_res2:
-            st.markdown("<div class='glass-card' style='height: 100%;'>", unsafe_allow_html=True)
-            st.markdown("<h3 style='margin-bottom: 20px;'>Hybrid Diagnostic Breakdown</h3>", unsafe_allow_html=True)
-            
-            st.progress(ml_score)
+    if not features_dict:
+        st.error("That doesn't look like a valid URL. Try something like `https://example.com/login`.")
+        st.stop()
+
+    with st.spinner("Scoring..."):
+        # Build the model input in the exact column order used during training
+        row = {col: features_dict.get(col, 0) for col in feature_cols}
+        df_features = pd.DataFrame([row], columns=feature_cols).fillna(0)
+        X_input = df_features.values
+
+        # 2. Rule-Based Score
+        rule_score, rule_reasons = rule_based_severity(features_dict)
+
+        # 3. External Threat Intel (live Google Safe Browsing if a key is set)
+        api_score, api_reasons, intel_mode = check_external_intel(url_input, google_api_key=GOOGLE_API_KEY)
+
+        # 4. ML Model Probability Score (Class 1: Malicious Probability)
+        ml_score = float(model.predict_proba(X_input)[0][1])
+
+        # ========================================================
+        # 5. Hybrid Optimization Formula
+        # ========================================================
+        # ML Model: 40% | Rule Based: 30% | Threat Intel: 30%
+        hybrid_score_raw = (0.4 * ml_score) + (0.3 * rule_score) + (0.3 * api_score)
+        risk_percentage = min(max(hybrid_score_raw * 100, 0.0), 100.0)
+
+        if risk_percentage > 70:
+            status, status_class, icon = "Critical Risk", "risk-high", "🚨"
+        elif risk_percentage > 35:
+            status, status_class, icon = "Suspicious", "risk-med", "⚠️"
+        else:
+            status, status_class, icon = "Likely Safe", "risk-low", "✅"
+
+    # RESULTS DASHBOARD
+    st.markdown("---")
+    st.caption(f"Analyzed: `{normalize_url(url_input)}`")
+
+    col_res1, col_res2 = st.columns([1, 2])
+
+    with col_res1:
+        st.markdown(f"""
+        <div class='glass-card' style='text-align: center;'>
+            <h3 style='color: #94a3b8; font-weight: 500;'>Overall Risk Score</h3>
+            <p class='metric-value {status_class}'>{risk_percentage:.1f}%</p>
+            <div style='font-size: 1.5rem; margin-top: 10px; font-weight: bold;'>{icon} {status}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    intel_label = "Google Safe Browsing (live)" if intel_mode == "live" else "Threat Intel (offline heuristic)"
+
+    with col_res2:
+        with st.container(border=True):
+            st.markdown("### Hybrid Diagnostic Breakdown")
+
+            st.progress(min(max(ml_score, 0.0), 1.0))
             st.caption(f"Machine Learning Confidence: **{ml_score*100:.1f}%**")
-            
-            st.progress(rule_score)
-            st.caption(f"Rule-Based Severity: **{rule_score*100:.1f}%**")
-            
-            st.progress(api_score)
-            st.caption(f"External API Threat Intelligence (Google/PhishTank): **{api_score*100:.1f}%**")
-            st.markdown("</div>", unsafe_allow_html=True)
 
-        # SIEMENS DEEP DIVE SECTION
-        st.markdown("### 🔍 Security Deep Dive")
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        
+            st.progress(min(max(float(rule_score), 0.0), 1.0))
+            st.caption(f"Rule-Based Severity: **{rule_score*100:.1f}%**")
+
+            st.progress(min(max(float(api_score), 0.0), 1.0))
+            st.caption(f"{intel_label}: **{api_score*100:.1f}%**")
+
+    # SECURITY DEEP DIVE SECTION
+    st.markdown("### 🔍 Security Deep Dive")
+    with st.container(border=True):
         deep_dive_found = False
-        
+
         if rule_reasons:
             deep_dive_found = True
             st.markdown("**Rule-Based Engine Flags:**")
             for r in rule_reasons:
                 st.markdown(f"- {r}")
-                
+
         if api_reasons:
             deep_dive_found = True
-            st.markdown("<br>**External Intel Flags:**", unsafe_allow_html=True)
+            st.markdown("**External Intel Flags:**")
             for r in api_reasons:
                 st.markdown(f"- {r}")
-                
+
         if ml_score > 0.6:
             deep_dive_found = True
-            st.markdown("<br>**Machine Learning Analysis:**", unsafe_allow_html=True)
-            st.markdown(f"- High ML Probability implies hidden obfuscated phishing patterns detected by the Voting Classifier.")
-            
+            st.markdown("**Machine Learning Analysis:**")
+            st.markdown("- High ML probability: the Voting Classifier matched this URL's structure to phishing patterns it learned during training.")
+
         if not deep_dive_found:
-            st.success("No anomalies detected. The URL structurally matches safe organizational architecture. API reports clean.")
-            
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        with st.expander("Show Raw Extracted Features Matrix"):
-            st.dataframe(df_features.T.rename(columns={0: "Feature Value"}), use_container_width=True)
+            st.success("No anomalies detected. The URL's structure looks normal and no threat-intel flags were raised.")
+
+    with st.expander("Show Raw Extracted Features Matrix"):
+        st.dataframe(df_features.T.rename(columns={0: "Feature Value"}), use_container_width=True)
 
 # Feature Importance Visualization in Sidebar
 if importance_df is not None:
     st.sidebar.markdown("## 📊 ML Feature Importance")
     st.sidebar.caption("Top drivers for the XGBoost model")
-    # Take top 10
     top_10 = importance_df.head(10).set_index("Feature")
     st.sidebar.bar_chart(top_10, use_container_width=True)
     st.sidebar.markdown("---")
 
-# Footer configuration info
+# Integrations status
 st.sidebar.markdown("## ⚙️ Integrations")
-st.sidebar.markdown("""
-To enable live external intelligence, add API keys into your `.env` or `secrets.toml`.
-
-`GOOGLE_SAFE_BROWSING_API_KEY=your_key`
-
-*Currently running in mock-intel mode.*
-""")
+if GOOGLE_API_KEY:
+    st.sidebar.success("Google Safe Browsing: API key configured (falls back to the offline heuristic if a lookup fails)")
+else:
+    st.sidebar.info(
+        "Google Safe Browsing: not configured — using the offline heuristic.\n\n"
+        "Add `GOOGLE_SAFE_BROWSING_API_KEY` to `.env` (local) or the app's Secrets (Streamlit Cloud) to enable live checks."
+    )
 st.sidebar.markdown("---")
-st.sidebar.caption("Safe Linker Pro v2.0 - Major Engineering Project")
+st.sidebar.caption("Safe Linker Pro v2.1 - Major Engineering Project")
